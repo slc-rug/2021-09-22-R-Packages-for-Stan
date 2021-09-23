@@ -1,0 +1,592 @@
+---
+title: "R packages for using Stan"
+author: "Greg Snow"
+date: "September 22, 2021"
+output: 
+  revealjs::revealjs_presentation:
+    reveal_options:
+      slideNumber: false
+      controls: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE, fig.height=6,
+                      out.height='500px')
+library(palmerpenguins)
+library(rstan)
+library(rstanarm)
+library(brms)
+library(shinystan)
+library(loo)
+
+library(beepr)
+```
+
+# R packages for working with Stan
+
+## Stan
+
+- R recognizes that it may not be the best tool for every job.
+
+- R packages for interfacing with other tools are common because of this.
+
+- Stan (https://mc-stan.org/) is a powerful tool/language for doing Bayesian model fitting.
+
+## A simple Stan model for comparing 2 means
+
+I have the following saved in a file "two_sample.stan"
+
+```
+data {
+ int<lower=1> N;
+ real y[N];
+ int<lower=1, upper=2> g[N];
+}
+
+parameters {
+  real mu[2];
+  real<lower=0> sigma[2];
+}
+
+model {
+  for(i in 1:N) {
+    y[i] ~ normal(mu[g[i]], sigma[g[i]]);
+  }
+}
+
+generated quantities {
+  real mu_diff;
+  real sigma_ratio;
+  
+  mu_diff = mu[1] - mu[2];
+  sigma_ratio = sigma[1]/sigma[2];
+}
+```
+
+# The rstan package
+
+## Compiling the Stan model
+
+```{r stan1}
+# load the package
+library(rstan)
+
+# run on multiple cores
+options(mc.cores = parallel::detectCores())
+
+# save compiled models so we don't need to recompile
+rstan_options(auto_write = TRUE)
+
+# compile the model
+twosamp.stan <- stan_model(file='two_sample.stan'); beepr::beep()
+```
+
+
+## Prepare data
+
+Is there a difference in weight between Female, Adelie penguins on Biscoe vs. Dream islands?
+
+```{r standat1}
+library(palmerpenguins)
+w <- penguins$species=='Adelie' & 
+      penguins$sex=='female' &
+      penguins$island %in% c("Biscoe", "Dream") &
+      !is.na(penguins$body_mass_g) &
+      !is.na(penguins$sex)
+
+BvD.standat <- list(
+  N=sum(w),
+  y=penguins$body_mass_g[w],
+  g=as.integer(penguins$island[w])
+)
+
+str(BvD.standat) 
+```
+
+## Finding the mode
+
+The `optimizing` function will find the mode (maximum point) of the posterior:
+
+```{r opt1, eval=FALSE}
+optimizing(twosamp.stan, BvD.standat)
+```
+
+```
+$par
+      mu[1]       mu[2]    sigma[1] 
+3369.318261 3344.505880  335.574488 
+   sigma[2]     mu_diff sigma_ratio 
+ 208.102721   24.812381    1.612543 
+
+$value
+[1] -296.574
+
+$return_code
+[1] 0
+
+$theta_tilde
+        mu[1]    mu[2] sigma[1] sigma[2]
+[1,] 3369.318 3344.506 335.5745 208.1027
+      mu_diff sigma_ratio
+[1,] 24.81238    1.612543
+```
+
+## Sampling the full posterior
+
+The `sampling` function is used to run McMC to sample from the entire posterior:
+
+```{r samp1}
+BvD.fit1 <- sampling(twosamp.stan, BvD.standat)
+```
+
+##
+
+```{r samp2}
+BvD.fit1
+```
+
+## Summary
+
+The `summary` function will also compute the same statistics, but so they can be stored in a variable.  It will be a list with a component for all the chains combined as well as for each chain.
+
+The `pars` arg is used to limit the parameters (rows) and the `probs` arg can be used to compute different quantiles.
+
+## Effective sample size and Rhat
+
+The `n_eff` column is the effective sample size, it should be large enough to give confidence in the results.  If some parameters have unusually small values, this is an indication that the model has not converged or there is a problem.
+
+The `Rhat` column is a measure of similarity between the chains.  It should be `1` or very near `1` if the model has converged.  Numbers greater than `1` indicate lack of convergence, the different starting points did not lead to the same values or not enough iterations.
+
+
+## Extracting the samples
+
+If you need the actual values, use the `extract` function:
+
+```{r extract1}
+out <- extract(BvD.fit1)
+head(out$mu)
+```
+
+## Extracting the samples
+
+```{r extract1_2}
+quantile(out$mu[,1]/out$mu[,2], c(0.025, 0.5, 0.975))
+```
+
+##
+
+```{r extract1_3}
+hist(out$mu[,1]/out$mu[,2])
+```
+
+# Diagnostic and Summary plots
+
+Many of the following plots can also be created using the `plot` method on a `stan` object with the `plotfun` argument set to the part of the plotting function name after `stan_`.
+
+## Quick summary
+
+```{r plot1, fig.show='hide'}
+stan_plot(BvD.fit1)
+```
+
+## Quick summary
+
+```{r plot1, echo=FALSE, results='hide'}
+```
+
+
+
+
+## Quick summary with options
+
+```{r plot2, fig.show='hide'}
+stan_plot(BvD.fit1, pars=c('mu','sigma'),
+          point_est='mean',
+          show_density=TRUE,
+          ci_level=0.95,
+          outer_level=0.99)
+```
+
+## Quick summary with options
+
+```{r plot2, echo=FALSE}
+```
+
+
+
+## Trace or catipillar plots
+
+```{r traceplot1}
+stan_trace(BvD.fit1)
+```
+
+## Trace or catipillar plots
+
+```{r traceplot2}
+stan_trace(BvD.fit1, inc_warmup=TRUE)
+```
+
+## Scatter plot
+
+```{r scat1}
+stan_scat(BvD.fit1, pars=c('mu_diff', 'mu[1]'))
+```
+
+## Histogram
+
+```{r hist1}
+stan_hist(BvD.fit1)
+```
+
+## Density plots
+
+```{r dens1}
+stan_dens(BvD.fit1)
+```
+
+## Density plots
+
+```{r dens2}
+stan_dens(BvD.fit1, pars='mu_diff', separate_chains=TRUE)
+```
+
+## Auto Correlation
+
+```{r ac1}
+stan_ac(BvD.fit1)
+```
+
+# Another Example
+
+## Gentoo Penguins
+
+Let's repeat the example using Gentoo instead of Adelie penguins.
+
+```{r standat2}
+w <- penguins$species=='Gentoo' & 
+      penguins$sex=='female' &
+      penguins$island %in% c("Biscoe", "Dream") &
+      !is.na(penguins$body_mass_g) &
+      !is.na(penguins$sex)
+
+BvD.standat2 <- list(
+  N=sum(w),
+  y=penguins$body_mass_g[w],
+  g=as.integer(penguins$island[w])
+)
+```
+
+## Gentoo Penguins
+
+```{r samp3}
+BvD.fit2 <- sampling(twosamp.stan, BvD.standat2)
+```
+
+##
+
+```{r samp4}
+BvD.fit2
+```
+
+## Trace plot
+
+```{r trace2}
+stan_trace(BvD.fit2)
+```
+
+## Why
+
+```{r speciestable}
+with(penguins, table(island, species))
+```
+
+## Reparameterization
+
+From section 21.7 of the Stan Users Guide:
+
+```{stan output.var="reparam"}
+parameters {
+  real y;
+  vector[9] x;
+}
+model {
+  y ~ normal(0, 3);
+  x ~ normal(0, exp(y/2));
+}
+```
+
+##
+
+```{r sampling5}
+rep.fit <- sampling(reparam)
+```
+
+##
+
+```{r outrep}
+rep.fit
+```
+
+##
+
+```{r trace3}
+stan_trace(rep.fit)
+```
+
+##
+
+```{r extract2}
+tmp <- extract(rep.fit)
+plot(tmp$x[,1], tmp$y)
+```
+
+## Reparameterized
+
+```{stan output.var="reparam2"}
+parameters {
+  real y_raw;
+  vector[9] x_raw;
+}
+transformed parameters {
+  real y;
+  vector[9] x;
+
+  y = 3.0 * y_raw;
+  x = exp(y/2) * x_raw;
+}
+model {
+  y_raw ~ std_normal(); // implies y ~ normal(0, 3)
+  x_raw ~ std_normal(); // implies x ~ normal(0, exp(y/2))
+}
+```
+
+##
+
+```{r sampling6}
+rep.fit2 <- sampling(reparam2)
+```
+
+##
+
+```{r outrep2}
+rep.fit2
+```
+
+##
+
+```{r trace4}
+stan_trace(rep.fit2)
+```
+
+##
+
+```{r extract3}
+tmp <- extract(rep.fit2)
+plot(tmp$x[,1], tmp$y)
+```
+
+
+# shinystan
+
+What if ...
+
+- I have trouble remembering all those plot commands?
+
+- I like clicking with the mouse more than typing at the keyboard?
+
+- I just want to do some quick exploration of the fitted model?
+
+## The shinystan package
+
+```{r shinystan1, eval=FALSE}
+library(shinystan)
+launch_shinystan(BvD.fit1)
+```
+
+## shinystan
+
+![](shinystan1.png)
+
+## shinystan
+
+![](shinystan2.png)
+
+## shinystan
+
+![](shinystan3.png)
+
+## shinystan
+
+![](shinystan4.png)
+
+
+# rstanarm
+
+I just want to fit a standard regression model, do I really need to write my own Stan code and Compile it?
+
+## rstanarm
+
+The `rstanarm` package has pre-compiled Stan code for several common models.  It also has R functions that are similar to the regular R functions for the models that will call the Stan models for you.
+
+## rstanarm
+
+```{r rstanarm1}
+library(rstanarm)
+fit1 <- stan_aov(body_mass_g ~ island, data=penguins,
+                 prior=R2(0.7, what='mean'))
+```
+
+##
+
+```{r rstanarm2}
+summary(fit1, probs=c(0.025, 0.5, 0.975))
+```
+
+##
+
+```{r rstanarm3}
+stan_trace(fit1)
+```
+
+##
+
+```{r rstanarm4}
+stan_plot(fit1, show_density=TRUE,
+          ci_level=0.95, outer_level=0.99)
+```
+
+## rstanarm
+
+Note that `stan_aov` and `stan_lm` only allow a general prior on $R^2$.
+
+Use `stan_glm` to set priors on individual coefficients.
+
+## stan_glm
+
+```{r rstanarm5}
+penguins$island <- factor(penguins$island, 
+                          levels=c("Dream", "Torgersen", "Biscoe"))
+fit2 <- stan_glm(body_mass_g ~ island,
+                 data=penguins,
+                 prior=hs())
+```
+##
+
+```{r rstanarm6}
+stan_plot(fit2, show_density=TRUE,
+          ci_level=0.95, outer_level=0.99)
+```
+
+## rstanarm
+
+Some of the other models in `rstanarm`
+
+- stan_betareg
+
+- stan_clogit
+
+- stan_glmer
+
+- stan_jm
+
+- stan_polr
+
+
+
+
+
+## Greg's opinion
+
+If you fit a pre-compiled model, use the default priors, and only look at the Intervals in the output; then you are not really doing Bayesian statistics.
+
+
+# brms
+
+The `brms` package focuses more on hierarchical models.
+
+Like `rstanarm` the interface is like regular R functions.
+
+## brms example
+
+```{r brms1}
+library(brms)
+
+fit3 <- brm(formula = time | cens(censored) ~ age * sex +
+              disease + (1 + age|patient),
+  data = kidney, family = lognormal(),
+  prior = c(set_prior("normal(0,5)", class = "b"),
+    set_prior("cauchy(0,2)", class = "sd"),
+    set_prior("lkj(2)", class = "cor")),
+  warmup = 1000, iter = 2000, chains = 4,
+  control = list(adapt_delta = 0.95))
+```
+
+##
+
+```{r brms2}
+fit3
+```
+
+##
+
+```{r brms3}
+plot(fit3)
+```
+
+# Leave One Out cross-validation
+
+The `loo` package does Leave One Out cross-validation as a method of identifying influential points and getting an overall measure of the fit of a model (which can then be used to compare models).
+
+The `rstanarm` and `brms` packages have built-in connections to the `loo` package.
+
+## Comparing models 
+
+```{r loo1}
+penguins <- penguins[!is.na(penguins$sex),]
+fit1 <- stan_glm(body_mass_g ~ species, 
+                 data = penguins)
+fit2 <- stan_glm(body_mass_g ~ species + sex, 
+                 data = penguins)
+fit3 <- stan_glm(body_mass_g ~ species*sex,
+                 data=penguins)
+
+# (for bigger models use as many cores as possible)
+loo1 <- loo(fit1, cores = 4)
+loo2 <- loo(fit2, cores = 4)
+loo3 <- loo(fit3, cores = 4)
+```
+
+## 
+
+```{r loo2}
+loo1
+```
+
+##
+
+```{r loo2_2}
+loo2
+```
+
+##
+
+```{r loo2_3}
+loo3
+```
+
+
+##
+
+```{r loo4}
+loo_compare(loo1, loo2, loo3)
+```
+
+# Others
+
+There ar a bunch of other packages that depend, import, or link to `rstan` fitting specific models.  See: https://cran.r-project.org/web/packages/rstan/index.html
+
+# Questions/Discussion
+
+
+
+
